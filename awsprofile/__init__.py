@@ -45,6 +45,13 @@ def parse_args(argv=sys.argv):
                         help='AWS profile to use')
     parser.add_argument('command', metavar='...', nargs=argparse.REMAINDER,
                         help='Command to run, with any arguments')
+    parser.add_argument('-e', '--export-mode', dest='export',
+                        action='store_true', help=(
+                            'Instead of running a command, print bash commands'
+                            ' to export the appropriate AWS environment'
+                            ' variables, e.g. eval $(aws-profile -e my_profile)'
+                        )
+                       )
     return parser.parse_args()
 
 def unset_profile(env):
@@ -56,27 +63,26 @@ def unset_profile(env):
     env.pop('AWS_DEFAULT_PROFILE', None)
     env.pop('AWS_PROFILE', None)
 
-def set_aws_env(env, session):
+def session_vars(session):
     '''
     Set environment variables for region, access and secret keys, and
     optionally security or session token, as determined by the config and
     credentials of the boto session.
     '''
     config = session.get_scoped_config()
-    region = config.get('region')
-    env['AWS_DEFAULT_REGION'] = region
-    env['AWS_REGION'] = region
-
     creds = session.get_credentials()
-    env['AWS_ACCESS_KEY_ID'] = creds.access_key
-    env['AWS_SECRET_ACCESS_KEY'] = creds.secret_key
-    env['AWS_SECRET_ACCESS_KEY'] = creds.secret_key
+    vars_dict = {
+        'AWS_DEFAULT_REGION': config.get('region'),
+        'AWS_REGION': config.get('region'),
+        'AWS_ACCESS_KEY_ID': creds.access_key,
+        'AWS_SECRET_ACCESS_KEY': creds.secret_key
+    }
     if creds.token:
         if os.getenv('AWS_TOKEN_TYPE') == 'security':
-            token_var = 'AWS_SECURITY_TOKEN'
+            vars_dict['AWS_SECURITY_TOKEN'] = creds.token
         else:
-            token_var = 'AWS_SESSION_TOKEN'
-        env[token_var] = creds.token
+            vars_dict['AWS_SESSION_TOKEN'] = creds.token
+    return vars_dict
 
 def main():
     args = parse_args()
@@ -84,15 +90,21 @@ def main():
     session = botocore.session.Session(profile=args.profile)
     configure_cache(session)
 
-    env = os.environ.copy()
-    unset_profile(env)
-    set_aws_env(env, session)
+    aws_vars = session_vars(session)
+    if args.export:
+        print('unset AWS_DEFAULT_PROFILE;')
+        print('unset AWS_PROFILE;')
+        for var, value in aws_vars.items():
+            print('export {var}={value};'.format(var=var, value=value))
+    else:
+        env = os.environ.copy()
+        unset_profile(env)
+        env.update(aws_vars)
+        returncode = subprocess.call(
+            args.command, env=env, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr
+        )
 
-    returncode = subprocess.call(
-        args.command, env=env, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr
-    )
-
-    exit(os.WEXITSTATUS(returncode))
+        exit(os.WEXITSTATUS(returncode))
 
 if __name__ == '__main__':
     main()
