@@ -5,8 +5,7 @@
 #
 # This script processes the configuration using boto (which supports this) and exports
 #     environment variables which are standardised for use with less current SDKs
-#
-
+import argparse
 import json
 import os
 import sys
@@ -16,6 +15,7 @@ import botocore.session
 
 from awscli.utils import json_encoder
 from awscli.customizations.assumerole import JSONFileCache
+
 # JSONFileCache from awscli does not serialize datetime, add json_encoder support
 class FixedJSONFileCache(JSONFileCache):
     def __setitem__(self, cache_key, value):
@@ -39,49 +39,57 @@ def configure_cache(session):
     provider.cache = FixedJSONFileCache()
 
 def parse_args(argv=sys.argv):
-    profile = os.getenv('AWS_DEFAULT_PROFILE')
-    if not profile: profile = os.getenv('AWS_PROFILE')
+    parser = argparse.ArgumentParser(
+            description='Run a command under a given AWS profile.')
+    parser.add_argument('profile', nargs='?', default=None,
+                        help='AWS profile to use')
+    parser.add_argument('command', metavar='...', nargs=argparse.REMAINDER,
+                        help='Command to run, with any arguments')
+    return parser.parse_args()
 
-    if not profile and len(argv) >= 3:
-        profile = argv.pop(1)
+def unset_profile(env):
+    '''
+    Unset AWS profile variables os that the command doesn't try (possibly
+    incorrectly) to use the profile itself.
+    '''
+    env = os.environ.copy()
+    env.pop('AWS_DEFAULT_PROFILE', None)
+    env.pop('AWS_PROFILE', None)
 
-    if not profile:
-        print("Usage: %s [profile] command [args]" % os.path.basename(argv[0]))
-        quit(1)
-
-    command = argv[1:]
-    return (profile, command)
-
-def main():
-    profile, command = parse_args()
-    session = botocore.session.Session(profile=profile)
-    configure_cache(session)
+def set_aws_env(env, session):
+    '''
+    Set environment variables for region, access and secret keys, and
+    optionally security or session token, as determined by the config and
+    credentials of the boto session.
+    '''
     config = session.get_scoped_config()
+    region = config.get('region')
+    env['AWS_DEFAULT_REGION'] = region
+    env['AWS_REGION'] = region
+
     creds = session.get_credentials()
-
-    # Unset variables for sanity sake
-    os.unsetenv('AWS_ACCESS_KEY_ID')
-    os.unsetenv('AWS_SECRET_ACCESS_KEY')
-    os.unsetenv('AWS_SESSION_TOKEN')
-    os.unsetenv('AWS_DEFAULT_PROFILE')
-    os.unsetenv('AWS_PROFILE')
-
-    region = config.get('region', None)
-    if region:
-        os.putenv('AWS_DEFAULT_REGION', region)
-        os.putenv('AWS_REGION', region)
-
-    os.putenv('AWS_ACCESS_KEY_ID', creds.access_key)
-    os.putenv('AWS_SECRET_ACCESS_KEY', creds.secret_key)
+    env['AWS_ACCESS_KEY_ID'] = creds.access_key
+    env['AWS_SECRET_ACCESS_KEY'] = creds.secret_key
+    env['AWS_SECRET_ACCESS_KEY'] = creds.secret_key
     if creds.token:
         if os.getenv('AWS_TOKEN_TYPE') == 'security':
-            os.putenv('AWS_SECURITY_TOKEN', creds.token)
+            token_var = 'AWS_SECURITY_TOKEN'
         else:
-            os.putenv('AWS_SESSION_TOKEN', creds.token)
+            token_var = 'AWS_SESSION_TOKEN'
+        env[token_var] = creds.token
 
+def main():
+    args = parse_args()
+
+    session = botocore.session.Session(profile=args.profile)
+    configure_cache(session)
+
+    env = os.environ.copy()
+    unset_profile(env)
+    set_aws_env(env, session)
 
     returncode = subprocess.call(
-        command, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr
+        args.command, env=env, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr
     )
 
     exit(os.WEXITSTATUS(returncode))
